@@ -11,7 +11,8 @@ class Edit:
 
 
 class Annotation:
-    def __init__(self, count):
+    def __init__(self, count, allowed_labels=("left", "right")):
+        self.allowed_labels = tuple(allowed_labels)
         self.labels = [None] * count
         self.cursor = 0
         self.history = []
@@ -28,7 +29,7 @@ class Annotation:
         self.labels[index] = value
 
     def begin(self, label):
-        if label not in ("left", "right"):
+        if label not in self.allowed_labels:
             raise ValueError("Unknown label")
         if self.active or not self.labels:
             return

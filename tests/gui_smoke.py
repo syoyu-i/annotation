@@ -11,6 +11,7 @@ from PIL import Image
 
 from annotation_model import Annotation
 from app import App
+from label_settings import label_colors
 
 
 class GuiSmokeTests(unittest.TestCase):
@@ -56,6 +57,23 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertFalse(app.dirty)
             app.undo()
             self.assertTrue(app.finish_button.instate(["disabled"]))
+            app.label_definitions = [("left", "a"), ("right", "d"), ("静止", "s")]
+            app.colors = label_colors(app.label_definitions)
+            app.model.allowed_labels = ("left", "right", "静止")
+            app.rebuild_label_buttons()
+            press("s")
+            for _ in range(4):
+                press("w")
+            app.key_release(SimpleNamespace(keysym="s"))
+            app.update()
+            self.assertEqual(app.model.labels, ["静止"] * 5)
+            app.undo()
+            press("Left")
+            self.assertIsNone(app.model.active)
+            press("a")
+            app.key_release(SimpleNamespace(keysym="a"))
+            app.update()
+            self.assertEqual(app.model.labels[0], "left")
         finally:
             app.destroy()
 

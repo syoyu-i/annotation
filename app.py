@@ -10,6 +10,7 @@ from PIL import Image, ImageTk
 
 import config
 from annotation_model import Annotation
+from label_settings import load_labels, save_labels, validate_labels, label_colors
 from export import export_files
 from video import VideoReader, scan
 
@@ -17,7 +18,13 @@ from video import VideoReader, scan
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("向きアノテーション")
+        self.title("動画ラベルアノテーション")
+        try:
+            self.label_definitions = load_labels()
+        except (ValueError, TypeError, OSError) as exc:
+            messagebox.showwarning("ラベル設定", f"設定を読み込めないため左右の初期設定を使用します。\n{exc}")
+            self.label_definitions = [("left", "left"), ("right", "right")]
+        self.colors = label_colors(self.label_definitions)
         self.geometry(config.WINDOW_SIZE)
         self.minsize(800, 620)
         self.model = None
@@ -42,6 +49,7 @@ class App(tk.Tk):
         top.pack(fill="x")
         self.open_button = ttk.Button(top, text="動画を開く", command=self.open_video)
         self.open_button.pack(side="left")
+        ttk.Button(top, text="ラベル設定", command=self.configure_labels).pack(side="left", padx=8)
         self.info = ttk.Label(top, text="動画を選択してください", padding=(12, 0))
         self.info.pack(side="left")
         self.video_canvas = tk.Canvas(self, bg=config.VIDEO_BACKGROUND, highlightthickness=0)
@@ -53,8 +61,6 @@ class App(tk.Tk):
         controls.pack(fill="x")
         self.edit_buttons = []
         for title, action in [("1フレーム戻る", lambda: self.step(-1)),
-                              ("← 左", lambda: self.label_one("left")),
-                              ("→ 右", lambda: self.label_one("right")),
                               ("1フレーム進む", lambda: self.step(1)),
                               ("元に戻す (Ctrl+Z)", self.undo)]:
             button = ttk.Button(controls, text=title, command=action, state="disabled")
@@ -62,10 +68,11 @@ class App(tk.Tk):
             self.edit_buttons.append(button)
         self.finish_button = ttk.Button(controls, text="完了・CSVと円グラフを出力", command=self.finish, state="disabled")
         self.finish_button.pack(side="right")
-        text = (f"← / →：1フレームをラベル付け（離すと次へ）　"
-                f"押したまま {config.EXTEND_KEY.upper()}：区間を延長 / {config.SHRINK_KEY.upper()}：短縮\n"
-                f"矢印を押していないときは {config.SHRINK_KEY.upper()} / {config.EXTEND_KEY.upper()} でコマ送り。"
-                "タイムラインをクリックして移動。青＝左、橙＝右、灰＝未入力。")
+        self.label_controls = ttk.Frame(self, padding=(12, 4))
+        self.label_controls.pack(fill="x")
+        self.rebuild_label_buttons()
+        text = (f"ラベルキー：離すと確定して次へ。押したまま {config.EXTEND_KEY.upper()}：延長 / {config.SHRINK_KEY.upper()}：短縮\n"
+                f"ラベルキーを押していないときは {config.SHRINK_KEY.upper()} / {config.EXTEND_KEY.upper()} でコマ送り。灰＝未入力。")
         ttk.Label(self, text=text, padding=(12, 8)).pack(fill="x")
         self.timeline = tk.Canvas(self, height=config.TIMELINE_HEIGHT, bg="white", highlightthickness=1,
                                   highlightbackground="#d1d5db")
@@ -77,6 +84,56 @@ class App(tk.Tk):
         self.timeline.bind("<Button-1>", self.timeline_click)
         self.status = ttk.Label(self, text="", padding=12)
         self.status.pack(fill="x")
+
+    def rebuild_label_buttons(self):
+        for child in self.label_controls.winfo_children():
+            if child in self.edit_buttons:
+                self.edit_buttons.remove(child)
+            child.destroy()
+        for i, (name, key) in enumerate(self.label_definitions):
+            button = ttk.Button(self.label_controls, text=f"{key.upper()}：{name}",
+                                command=lambda label=name: self.label_one(label),
+                                state="normal" if self.ready() else "disabled")
+            button.grid(row=i // 5, column=i % 5, padx=(0, 8), pady=3, sticky="w")
+            self.edit_buttons.append(button)
+
+    def configure_labels(self):
+        if self.loading:
+            return
+        self.commit_gesture()
+        dialog = tk.Toplevel(self)
+        dialog.title("ラベル設定（最大10個・左右を含む）")
+        dialog.transient(self)
+        dialog.grab_set()
+        ttk.Label(dialog, text="既存ラベルのキー変更と新規追加ができます。Q/Wは予約済み。", padding=12).grid(row=0, columnspan=2)
+        ttk.Label(dialog, text="ラベル名").grid(row=1, column=0)
+        ttk.Label(dialog, text="キー（英数字 / Left / Right / Up / Down）").grid(row=1, column=1)
+        entries = []
+        for i in range(10):
+            name = tk.StringVar(value=self.label_definitions[i][0] if i < len(self.label_definitions) else "")
+            key = tk.StringVar(value=self.label_definitions[i][1] if i < len(self.label_definitions) else "")
+            ttk.Entry(dialog, textvariable=name, state="readonly" if i < len(self.label_definitions) else "normal").grid(row=i+2, column=0, padx=12, pady=3)
+            ttk.Entry(dialog, textvariable=key).grid(row=i+2, column=1, padx=12, pady=3)
+            entries.append((name, key))
+
+        def apply():
+            try:
+                rows = validate_labels([(n.get(), k.get()) for n, k in entries if n.get().strip() or k.get().strip()])
+                save_labels(rows)
+            except (ValueError, OSError) as exc:
+                messagebox.showerror("ラベル設定", str(exc), parent=dialog)
+                return
+            self.label_definitions = rows
+            self.colors = label_colors(rows)
+            if self.model:
+                self.model.allowed_labels = tuple(n for n, _ in rows)
+            self.rebuild_label_buttons()
+            self.refresh()
+            dialog.destroy()
+            self.focus_set()
+
+        ttk.Button(dialog, text="保存", command=apply).grid(row=12, column=0, pady=12)
+        ttk.Button(dialog, text="キャンセル", command=dialog.destroy).grid(row=12, column=1, pady=12)
 
     def open_video(self):
         if self.loading:
@@ -124,7 +181,7 @@ class App(tk.Tk):
                         if self.reader:
                             self.reader.close()
                         self.reader, self.index = reader, value
-                        self.model = Annotation(len(value.frames))
+                        self.model = Annotation(len(value.frames), [name for name, _ in self.label_definitions])
                         self.dirty = False
                         fps = f"{float(value.fps):.6g} fps ({value.fps})" if value.fps else "FPS情報なし"
                         mode = "可変間隔" if value.variable_rate else "固定間隔"
@@ -151,7 +208,8 @@ class App(tk.Tk):
             return "break"
         if event.state & (0x4 | 0x8):
             return
-        if key in ("left", "right"):
+        key_labels = {shortcut: name for name, shortcut in self.label_definitions}
+        if key in key_labels:
             if key == self.held_arrow:
                 if self.release_job:
                     self.after_cancel(self.release_job)
@@ -159,7 +217,7 @@ class App(tk.Tk):
                 return "break"
             if self.held_arrow is None:
                 self.held_arrow = key
-                self.model.begin(key)
+                self.model.begin(key_labels[key])
                 self.dirty = True
                 self.refresh()
             return "break"
@@ -234,7 +292,7 @@ class App(tk.Tk):
             return
         model = self.model
         frame = self.index.frames[model.cursor]
-        label = {None: "未入力", "left": "← 左", "right": "→ 右"}[model.labels[model.cursor]]
+        label = model.labels[model.cursor] or "未入力"
         active = f"  |  編集区間：{model.active['length']} フレーム" if model.active else ""
         self.position.configure(text=f"フレーム {model.cursor + 1:,} / {len(model.labels):,}  "
                                      f"（CSV index: {model.cursor}）  |  {float(frame.time):.6f} 秒  |  {label}{active}")
@@ -286,7 +344,7 @@ class App(tk.Tk):
         tick = max(1, round(90 / width))
         for i in range(first, last):
             x = i * width
-            canvas.create_rectangle(x, 30, x + width, 70, fill=config.COLORS[self.model.labels[i]], outline="white")
+            canvas.create_rectangle(x, 30, x + width, 70, fill=self.colors[self.model.labels[i]], outline="white")
             if i % tick == 0:
                 canvas.create_text(x + 2, 15, anchor="w", text=str(i + 1), fill="#374151")
                 canvas.create_text(x + 2, 90, anchor="w", text=f"{float(self.index.frames[i].time):.2f}s", fill="#6b7280")
@@ -312,7 +370,7 @@ class App(tk.Tk):
         if existing and not messagebox.askyesno("出力の上書き", "次のファイルを上書きしますか？\n" + "\n".join(existing)):
             return
         try:
-            csv_path, svg_path = export_files(path, self.index, self.model.labels)
+            csv_path, svg_path = export_files(path, self.index, self.model.labels, self.colors)
         except Exception as exc:
             messagebox.showerror("出力エラー", f"出力を完了できませんでした。保存先をご確認ください。\n{exc}")
             return
